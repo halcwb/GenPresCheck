@@ -2,12 +2,69 @@
 #time
 
 #load "../FormularyParser/formularyParser.fsx"
-
+      "../ExcelMedicationParser/excelParser.fsx"
 
 open System
 
 
 Environment.CurrentDirectory <- __SOURCE_DIRECTORY__
+
+[<CompilationRepresentation(CompilationRepresentationFlags.ModuleSuffix)>]
+module String =
+
+    open System
+
+    open System.Text.RegularExpressions
+
+    let regex s = new Regex(s)
+
+    let apply f (s: string) = f s
+
+    let nullOrEmpty = apply String.IsNullOrEmpty
+
+    let notNullOrEmpty = nullOrEmpty >> not
+
+    let splitAt (s1: string) (s2: string) =
+        s2.Split([|s1|], StringSplitOptions.None)
+
+    let arrayConcat (cs : char[]) = String.Concat(cs)
+
+    let replace (s1: String) s2 s = (s |> apply id).Replace(s1, s2)
+
+    let trim s = (s |> apply id).Trim()
+
+    let substring n l s = (s |> apply id).Substring(n, l)
+
+    let toLower s = (s |> apply id).ToLower()
+
+    let eqsCapsInsens s1 s2 =
+        s1 |> trim |> toLower = (s2 |> trim |> toLower)
+
+    let startsWithCapsInsens s2 s1 =
+        let s1, s2 = s1 |> trim |> toLower, s2 |> trim |> toLower
+        let l = 
+            if s2 |> String.length > (s1 |> String.length) then 
+                s1 |> String.length
+            else s2 |> String.length
+        s1 
+        |> substring 0 l
+        |> ((=) s2)
+
+    /// Count the number of times character
+    /// c appears in string t
+    let countChar c t =
+        if String.IsNullOrEmpty(c) then "Cannot count empty string in text: '" + t + "'" |> failwith
+        (c |> regex).Matches(t).Count
+
+    /// Count the number of times that a 
+    /// string t starts with character c
+    let countFirstChar c t =
+        let _, count = 
+            if String.IsNullOrEmpty(t) then (false, 0)
+            else
+                t |> Seq.fold(fun (flag, dec) c' -> if c' = c && flag then (true, dec + 1) else (false, dec)) (true, 0) 
+        count
+
 
 
 [<CompilationRepresentation(CompilationRepresentationFlags.ModuleSuffix)>]
@@ -25,6 +82,20 @@ module Validator =
         type ValueUnit = { Value : float ; Unit : string }
 
         let create v u = { Value = v ; Unit = u }
+
+        let normalize (vu: ValueUnit) =
+            match vu.Unit with
+            | _ when vu.Unit = "year"  -> vu.Value * 365.
+            | _ when vu.Unit = "month" -> vu.Value * 30. 
+            | _ when vu.Unit = "week"  -> vu.Value * 7.
+            | _ when vu.Unit = "day"   -> vu.Value
+            | _ when vu.Unit = "dag"   -> vu.Value
+            | _ when vu.Unit = "kg"    -> vu.Value * 1000.
+            | _ when vu.Unit = "gram"  -> vu.Value
+            | _ when vu.Unit = "gr"  -> vu.Value
+            | _ -> 
+                sprintf "Cannot normalize %A" vu
+                |> failwith 
 
 
     [<CompilationRepresentation(CompilationRepresentationFlags.ModuleSuffix)>]
@@ -67,6 +138,51 @@ module Validator =
         let emtpyBsaRange = BsaRange (None, None)
 
 
+        let isInRange (min : ValueUnit Option) (max : ValueUnit Option) (vu : ValueUnit Option) =
+            match min, max, vu with
+            | None, None, _ -> true
+            | Some min', Some max', Some vu' -> 
+                min' |> ValueUnit.normalize <= (vu' |> ValueUnit.normalize) &&
+                max' |> ValueUnit.normalize >= (vu' |> ValueUnit.normalize)
+            | Some min', None, Some vu' ->
+                min' |> ValueUnit.normalize <= (vu' |> ValueUnit.normalize)
+            | None, Some max', Some vu' ->
+                max' |> ValueUnit.normalize >= (vu' |> ValueUnit.normalize)   
+            | _ -> false 
+
+        let matchAgeTypeWith targ rule =
+            match (targ, rule) with
+            | _, AllAge            
+            | Premature, Premature 
+            | Neonate, Neonate     
+            | Aterm, Aterm
+            | Aterm, Neonate       
+            | Child, Child         
+            | Adult, Adult         
+            | AllAge, AllAge -> true
+            | _ -> false
+
+        let filter gnd agt cag gag pca bwt wgt (t : TargetFilter) = 
+            let cagr = 
+                let (ChronAgeRange(min, max)) = t.ChronAgeRange in min, max
+            let gagr = 
+                let (GestAgeRange(min, max)) = t.GestAgeRange in min, max
+            let pcar = 
+                let (PostConcAgeRange(min, max)) = t.PostConcAgeRange in min, max
+            let bwtr = 
+                let (BirthWeightRange(min, max)) = t.BirthWeightRange in min, max
+            let wgtr = 
+                let (WeightRange(min, max)) = t.WeightRange in min, max
+
+            t.Gender = gnd &&
+            t.AgeType |> matchAgeTypeWith agt &&
+            (cag |> isInRange (cagr |> fst) (cagr |> snd)) &&
+            (gag |> isInRange (gagr |> fst) (gagr |> snd)) &&
+            (pca |> isInRange (pcar |> fst) (pcar |> snd)) &&
+            (bwt |> isInRange (bwtr |> fst) (bwtr |> snd)) &&
+            (wgt |> isInRange (wgtr |> fst) (wgtr |> snd)) 
+            
+
     [<CompilationRepresentation(CompilationRepresentationFlags.ModuleSuffix)>]
     module DiagnoseFilter =
 
@@ -97,6 +213,36 @@ module Validator =
 
         let createRoute s = s |> Route
 
+        let eqsString s (Route r) = s |> String.eqsCapsInsens r
+
+        let replace = 
+            [
+                "or", "Oraal"
+                "iv", "Intraveneus"
+                "im", "Intramusculair"
+                "rect", "Rectaal"
+                "oog", "Oculair"
+                "inh", "Inhalatie"
+                "sc", "Subcutaan"
+            ]
+
+        let normalize rts =
+            rts
+            |> List.map (fun s ->
+                match replace |> List.tryFind (fst >> (String.eqsCapsInsens s)) with
+                | Some s' -> s' |> snd
+                | None -> s
+            )
+
+        let filter rts (RouteFilter(rf)) =
+            rf
+            |> List.exists (fun r ->
+                rts
+                |> normalize
+                |> List.exists (fun r' -> r |> eqsString r')
+            )
+            
+
 
     [<CompilationRepresentation(CompilationRepresentationFlags.ModuleSuffix)>]
     module DoseRange =
@@ -106,6 +252,19 @@ module Validator =
         type DoseRange = DoseRange of ValueUnit Option * ValueUnit Option
 
         let create vu = vu |> DoseRange
+
+        let isInRange (vu: ValueUnit Option) (DoseRange(min, max)) =
+            match min, max, vu with 
+            | None, None, _ 
+            | _, _, None -> false
+            | Some min', Some max', Some vu' ->
+                min'.Value <= vu'.Value &&
+                max'.Value >= vu'.Value
+            | Some min', None, Some vu' ->
+                min'.Value <= vu'.Value
+            | None, Some max', Some vu' ->
+                max'.Value >= vu'.Value
+            
 
 
     [<CompilationRepresentation(CompilationRepresentationFlags.ModuleSuffix)>]
@@ -156,6 +315,11 @@ module Validator =
         let createBolus dv tv = (dv , tv) |> Bolus
 
         let createContinuous dv = dv |> Continuous
+
+        let isValid vu = function
+        | Dose (_, dr, _) -> dr |> DoseRange.isInRange vu
+        | _ -> false
+
 
 
     [<CompilationRepresentation(CompilationRepresentationFlags.ModuleSuffix)>]
@@ -233,6 +397,19 @@ module Validator =
                 Error = err
                 Text = txt
             }
+
+        let filter gen gnd agt cag gag pca bwt wgt rts (r: Rule) =
+            (gen |> String.startsWithCapsInsens r.Generic ||
+             r.Generic |> String.startsWithCapsInsens gen) &&
+
+            r.Targets |> TargetFilter.filter gnd agt cag gag pca bwt wgt &&
+            r.Routes  |> RouteFilter.filter rts
+            
+        let isValid dos (r: Rule) =
+            r.Error
+            |> List.fold (fun a dr ->
+                dr |> DoseRule.isValid dos && a
+            ) true
 
         let targetTypeGender = function
             | FP.Drug.Target.TargetType.Girl -> TargetFilter.Gender.Female
@@ -366,36 +543,163 @@ module Validator =
                                 | None -> () ]
                    
 
+module Check =
+
+    open System
+
+    let objToFloat (o: obj) =
+        match o with
+        | null -> None
+        | _ -> o :?> float |> Some
+
+    let objToString (o: obj) =
+        match o with
+        | null -> ""
+        | _ -> o :?> string
+
+    let parseGeneric s =
+        let s = 
+            s 
+            |> objToString
+            |> String.replace "ï" "i"
+        match s |> String.splitAt " " |> Array.toList with
+        | h::_ -> h
+        | _ -> s
+
+    let form = FormularyParser.WebSiteParser.getFormulary ()
+
+    let toRow valid rule (r : ExcelParser.Prescription.Prescription.Row) =
+        [
+            r.LastName
+            r.FirstName
+            r.Generic
+            r.Route
+            (match r.Frequency |> objToFloat with | Some v -> v.ToString() | None -> "")
+            r.FreqUnit
+            (match r.Dose |> objToFloat with | Some v -> v.ToString() | None -> "")
+            r.DoseUnit
+            (match r.DoseTotal |> objToFloat with | Some v -> v.ToString() | None -> "")
+            r.TotalUnit
+            valid.ToString()
+            rule
+        ]
+    
+    let check () =
+        [
+            for p in ExcelParser.Prescription.get () do
+                let gen = p.Generic |> parseGeneric
+                let gnd = Validator.TargetFilter.AnyGender
+                let agt =
+                    match p.GestAgeWeeks |> objToFloat with
+                    | Some a -> 
+                            if a < 37. then 
+                                Validator.TargetFilter.AgeType.Premature
+                            else Validator.TargetFilter.AgeType.Neonate
+                    | None -> Validator.TargetFilter.AgeType.AllAge
+                let cag =
+                    let ds = 
+                        (p.BirthDate - p.Start).Days |> float
+                    Validator.ValueUnit.create ds "day"
+                    |> Some
+                let gag =
+                    match (p.GestAgeWeeks |> objToFloat, p.GestAgeDays |> objToFloat) with
+                    | Some ws, Some ds -> Validator.ValueUnit.create (ws * 7. + ds) "day" |> Some
+                    | _ -> None
+                let pca =
+                    match (p.GestAgeWeeks |> objToFloat, p.GestAgeDays |> objToFloat) with
+                    | Some ws, Some ds -> 
+                        match cag with
+                        | Some a -> 
+                            let v = a.Value + ws * 7. + ds
+                            Validator.ValueUnit.create v "day" |> Some
+                        | None -> None
+                    | _ -> None
+                let bwt =
+                    match p.BirthWeight |> objToFloat with
+                    | Some w -> 
+                        if p.BirthWghtUnit |> objToString = "kg" then
+                            Validator.ValueUnit.create (w * 1000.) "gram"
+                        else Validator.ValueUnit.create w "gram"
+                        |> Some
+                    | _ -> None
+                let wgt =
+                    match p.Weight |> objToFloat with
+                    | Some w -> 
+                        if p.WeightUnit |> objToString = "kg" then
+                            Validator.ValueUnit.create (w * 1000.) "gram"
+                        else Validator.ValueUnit.create w "gram"
+                        |> Some
+                    | _ -> None
+                let rts =
+                    p.Route |> objToString |> String.splitAt "/" |> Array.toList
+                let dos =
+                    match p.DoseTotal |> objToFloat with
+                    | Some v ->
+                        Validator.ValueUnit.create v p.TotalUnit |> Some
+                    | None -> None
+                    
+                match Validator.Rule.fromPediatricFormulary form
+                      |> List.filter (Validator.Rule.filter gen gnd agt cag gag pca bwt wgt rts) with
+                | h::_ -> yield p |> toRow (h |> Validator.Rule.isValid dos) h.Text
+                | _ ->
+                    yield p |> toRow false ""
+        ]
 
 
-Validator.Rule.fromPediatricFormulary (FormularyParser.WebSiteParser.getFormulary ())     
-FormularyParser.WebSiteParser.getFormulary ()
-|> Array.filter (fun d ->
-    d.Doses
-    |> List.exists (fun d ->
-        d.Routes
-        |> List.exists (fun r ->
-            r.Schedules
-            |> List.exists (fun s ->
-                if s.FrequencyText.ToLower().Contains ("bolus") then true
-                else false
-            )
-        )
-    )
-) 
-|> Array.toList
-|> List.collect (fun d ->
-    d.Doses
-    |> List.collect (fun d ->
-        d.Routes
-        |> List.collect (fun r ->
-            r.Schedules
-            |> List.map (fun s ->
-                s.TargetText + ": " + s.FrequencyText + ", " + s.ValueText + " " + s.Unit
-            )
-        )
-    )
-)
+
+Check.check () |> ExcelParser.ExcelWriter.seqToExcel "check" "medication"
+|> List.filter (fun (gen, vld, txt) -> txt |> Option.isSome) // |> List.length
+|> List.distinct
 |> List.iter (printfn "%A")
+
+Check.form
+|> Array.filter (fun d -> d.Generic |> String.startsWithCapsInsens "gentamicine")
+|> Validator.Rule.fromPediatricFormulary
+|> List.map (fun r -> r.Text)
+|> List.iter (printfn "%s")
+
+Check.form
+|> Array.filter (fun d -> d.Generic |> String.startsWithCapsInsens "parac")
+|> Array.filter (fun dr ->
+    dr.Doses
+    |> List.exists (fun ds ->
+        ds.Routes
+        |> List.exists (fun rt ->
+            rt.Schedules
+            |> List.length > 1
+        )
+    )
+) |> Array.length
+
+//
+//Validator.Rule.fromPediatricFormulary (FormularyParser.WebSiteParser.getFormulary ())     
+//FormularyParser.WebSiteParser.getFormulary ()
+//|> Array.filter (fun d ->
+//    d.Doses
+//    |> List.exists (fun d ->
+//        d.Routes
+//        |> List.exists (fun r ->
+//            r.Schedules
+//            |> List.exists (fun s ->
+//                if s.FrequencyText.ToLower().Contains ("bolus") then true
+//                else false
+//            )
+//        )
+//    )
+//) 
+//|> Array.toList
+//|> List.collect (fun d ->
+//    d.Doses
+//    |> List.collect (fun d ->
+//        d.Routes
+//        |> List.collect (fun r ->
+//            r.Schedules
+//            |> List.map (fun s ->
+//                s.TargetText + ": " + s.FrequencyText + ", " + s.ValueText + " " + s.Unit
+//            )
+//        )
+//    )
+//)
+//|> List.iter (printfn "%A")
 
   
