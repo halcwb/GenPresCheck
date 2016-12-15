@@ -9,6 +9,71 @@ open System
 
 Environment.CurrentDirectory <- __SOURCE_DIRECTORY__
 
+
+[<CompilationRepresentation(CompilationRepresentationFlags.ModuleSuffix)>]
+module DateTime =
+    open System
+    
+
+    /// Returns age in years, months, weeks and days
+    /// Given a DateTime 'date1' and a DateTime 'date2'
+    /// where 'date1' should be >= 'date2' to get a positive
+    /// age, otherwise age will be negative
+    let now = DateTime.Now
+    let daysInYear = (now.AddYears(1) - now).Days
+    let daysInMonth = daysInYear / 12
+    let daysInWeek = 7
+
+    let age (date1:DateTime) (date2: DateTime) = 
+
+        let inv, date1, date2 = 
+            if date1 > date2 then false, date1, date2 else true, date2, date1
+
+        let y, date2 = date1.Year - date2.Year, date2.AddYears(date1.Year - date2.Year)
+        let y, date2 = 
+            if (date1 - date2).Days < 0 then y - 1, date2.AddYears(-1) else y, date2
+
+        let m, date2 = 
+            if date1.Year = date2.Year then 
+                date1.Month - date2.Month, date2.AddMonths(date1.Month - date2.Month) 
+            else 
+                (12 - date2.Month) + date1.Month, date2.AddMonths((12 - date2.Month) + date1.Month)
+        let m, date2 = 
+            if (date1 - date2).Days < 0 then m - 1, date2.AddMonths(-1) else m, date2
+
+        let d = (date1 - date2).Days
+        let d, w = d % 7, d / 7
+        
+        if inv then -y, -m, -w, -d
+        else y, m, w, d
+
+    let ageNow = age DateTime.Now
+
+    let ageToString  years months weeks days age =
+        let pluralize n s = 
+            match n with 
+            | 1 -> n.ToString() + " " + (s |> fst)
+            | _ -> n.ToString() + " " + (s |> snd)
+        let yr, mo, wk, d = age
+        let s =
+            match yr, mo with 
+            | _ when yr > 10 -> pluralize yr years
+            | _ when yr > 0  -> pluralize yr years + " " + pluralize mo months
+            | _ when mo > 0  -> pluralize mo months + " " + pluralize wk weeks
+            | _              -> pluralize wk weeks + " " + pluralize d days
+        s.Trim() 
+
+    let ageToStringDutch = ageToString ("jaar", "jaar") 
+                                       ("maand", "maanden") 
+                                       ("week", "weken") 
+                                       ("dag", "dagen")
+
+    let getAgeFromDate = ageNow >> ageToStringDutch
+
+    let dateDiffToAgeString dt1 dt2 = age dt1 dt2 |> ageToStringDutch
+
+
+
 [<CompilationRepresentation(CompilationRepresentationFlags.ModuleSuffix)>]
 module String =
 
@@ -68,6 +133,50 @@ module String =
 
 
 [<CompilationRepresentation(CompilationRepresentationFlags.ModuleSuffix)>]
+module Double =
+
+    open System
+
+    let tryParse s =
+        let (b, n) = Double.TryParse(s, Globalization.NumberStyles.Any, Globalization.CultureInfo.InvariantCulture) //Double.TryParse(s)
+        if b then Some n else None
+
+    let stringToFloat32 s =
+        match s |> tryParse with
+        | Some v -> float32 v
+        | None -> 0.f
+
+    let stringToFloat s =
+        match s |> tryParse with
+        | Some v -> float v
+        | None -> 0.
+
+    /// Calculates the number of decimals that 
+    /// should be shown according to a precision 
+    /// number n that specifies the number of non
+    /// zero digits in the decimals
+    let getPrecision n f =
+        let f = (f |> string).Split([|'.'|])
+        let n = n - if f.[0] = "0" then 0 else f.[0].Length
+        let n = if n < 0 then 0 else n
+        if f.Length = 1 then
+            n
+        else
+            let c = (f.[1] |> String.countFirstChar '0')
+            c + n
+
+    /// Fix the precision of a float f to
+    /// match a minimum of non zero digits n
+    let fixPrecision n (f: float) =
+        Math.Round(f, f |> getPrecision n)
+
+    let toString n f =
+        f
+        |> fixPrecision n
+        |> string
+
+
+[<CompilationRepresentation(CompilationRepresentationFlags.ModuleSuffix)>]
 module Tuple =
 
     let tuple x1 x2 = (x1 , x2)
@@ -92,10 +201,32 @@ module Validator =
             | _ when vu.Unit = "dag"   -> vu.Value
             | _ when vu.Unit = "kg"    -> vu.Value * 1000.
             | _ when vu.Unit = "gram"  -> vu.Value
-            | _ when vu.Unit = "gr"  -> vu.Value
+            | _ when vu.Unit = "gr"    -> vu.Value
             | _ -> 
                 sprintf "Cannot normalize %A" vu
                 |> failwith 
+
+        let toString (vu: ValueUnit)  = 
+            sprintf "%s %s" (vu.Value |> Double.toString 2) vu.Unit
+
+        let increase x ({Value = v; Unit = u}) = { Value = v * x; Unit = u } 
+
+        let rangeToString nm vu1 vu2 =
+            let r =
+                match vu1, vu2 with
+                | Some min, Some max ->
+                    sprintf "%s - %s" 
+                        (min |> toString) 
+                        (max |> toString)
+                | Some min, None -> 
+                    sprintf "> %s" 
+                        (min |> toString)
+                | None, Some max ->
+                    sprintf "< %s"
+                        (max |> toString)
+                | None, None -> ""
+            if r |> String.IsNullOrWhiteSpace then ""
+            else sprintf "%s: %s " nm r
 
 
     [<CompilationRepresentation(CompilationRepresentationFlags.ModuleSuffix)>]
@@ -137,6 +268,39 @@ module Validator =
 
         let emtpyBsaRange = BsaRange (None, None)
 
+        let toString (tg: TargetFilter) =
+            let rangeToString = ValueUnit.rangeToString
+            let gn = 
+                match tg.Gender with
+                | Male -> "male "
+                | Female -> "female "
+                | AnyGender -> ""
+            let at =
+                match tg.AgeType with
+                | Neonate -> "neonate "
+                | Premature -> "premature "
+                | Aterm -> "aterm "
+                | Child -> "child "
+                | Adult -> "adult "
+                | AllAge -> ""
+            let ca = 
+                let (ChronAgeRange(vu1, vu2)) = tg.ChronAgeRange
+                rangeToString "age" vu1 vu2
+            let pa = 
+                let (PostConcAgeRange(vu1, vu2)) = tg.PostConcAgeRange
+                rangeToString "post conc age" vu1 vu2
+            let ga = 
+                let (GestAgeRange(vu1, vu2)) = tg.GestAgeRange
+                rangeToString "gest age" vu1 vu2
+            let bw = 
+                let (BirthWeightRange(vu1, vu2)) = tg.BirthWeightRange
+                rangeToString "birthweight" vu1 vu2
+            let aw = 
+                let (WeightRange(vu1, vu2)) = tg.WeightRange
+                rangeToString "weight" vu1 vu2
+            sprintf "%s %s %s %s %s %s %s" gn at ca pa ga bw aw
+            |> String.trim
+            
 
         let isInRange (min : ValueUnit Option) (max : ValueUnit Option) (vu : ValueUnit Option) =
             match min, max, vu with
@@ -202,6 +366,21 @@ module Validator =
             (cns |> List.map createContraindication)
             |> create (ins |> List.map createIndication) 
 
+        let indicationToString (Indication(s)) = s
+
+        let contraIndToString (ContraIndication(s)) = s
+
+        let toString (DiagnoseFilter(ids, cds)) =
+            let ind =
+                ids
+                |> List.map indicationToString
+                |> String.concat ", "
+            let cnd = 
+                cds
+                |> List.map contraIndToString
+                |> String.concat ", "
+            sprintf "Indications: %s, Contra-indications %s" ind cnd
+
 
     [<CompilationRepresentation(CompilationRepresentationFlags.ModuleSuffix)>]
     module RouteFilter =
@@ -225,6 +404,14 @@ module Validator =
                 "inh", "Inhalatie"
                 "sc", "Subcutaan"
             ]
+
+        let routeToString (Route(s)) = s
+
+        let toString (RouteFilter(rl)) =
+            rl
+            |> List.map routeToString
+            |> String.concat ", "
+            |> sprintf "%s"
 
         let normalize rts =
             rts
@@ -253,6 +440,9 @@ module Validator =
 
         let create vu = vu |> DoseRange
 
+        let toString (DoseRange(vu1, vu2)) =
+            ValueUnit.rangeToString "Dose range" vu1 vu2
+
         let isInRange (vu: ValueUnit Option) (DoseRange(min, max)) =
             match min, max, vu with 
             | None, None, _ 
@@ -276,6 +466,9 @@ module Validator =
 
         let create vu = vu |> TimeRange
 
+        let toString (TimeRange(vu1, vu2)) =
+            ValueUnit.rangeToString " in " vu1 vu2
+
 
     [<CompilationRepresentation(CompilationRepresentationFlags.ModuleSuffix)>]
     module FrequencyRange =
@@ -295,6 +488,10 @@ module Validator =
         let onceDaily =
             let vu = ValueUnit.create 1. "day" |> Some
             (vu, vu) |> FrequencyRange
+
+
+        let toString (FrequencyRange(vu1, vu2)) =
+            ValueUnit.rangeToString "Frequency range" vu1 vu2
             
 
 
@@ -312,6 +509,23 @@ module Validator =
 
         let createDose fv dv tv = (fv , dv , tv) |> Dose
 
+        let createAdvWarnErr fv (DoseRange.DoseRange(min, max)) tv =
+            match min, max with
+            // When there only is an advice, calculate warning and error
+            | Some _, Some _ when min = max ->
+                let adv =  [ createDose fv (DoseRange.create (min, max)) tv ]
+                let war = [ createDose fv 
+                                (DoseRange.create 
+                                (min |> Option.bind ((ValueUnit.increase 0.9) >> Some), 
+                                    max |> Option.bind ((ValueUnit.increase 1.1) >> Some))) tv ] 
+                let err = [ createDose fv 
+                                (DoseRange.create 
+                                (min |> Option.bind ((ValueUnit.increase 0.5) >> Some), 
+                                    max |> Option.bind ((ValueUnit.increase 1.5) >> Some))) tv ] 
+                adv, war, err
+            // When there is a range, only use error
+            | _ -> [], [], [ createDose fv (DoseRange.create (min, max)) tv ]
+
         let createBolus dv tv = (dv , tv) |> Bolus
 
         let createContinuous dv = dv |> Continuous
@@ -319,6 +533,20 @@ module Validator =
         let isValid vu = function
         | Dose (_, dr, _) -> dr |> DoseRange.isInRange vu
         | _ -> false
+
+        let toString = function
+            | Dose(fr, dr, tr) -> 
+                sprintf "%s %s %s" 
+                    (fr |> FrequencyRange.toString)
+                    (dr |> DoseRange.toString)
+                    (match tr with Some tr' -> tr' |> TimeRange.toString | None -> "")
+            | Bolus(dr, tr) ->
+                sprintf "%s %s"
+                    (dr |> DoseRange.toString)
+                    (match tr with Some tr' -> tr' |> TimeRange.toString | None -> "")
+            | Continuous dr ->
+                sprintf "%s"
+                    (dr |> DoseRange.toString)
 
 
 
@@ -341,6 +569,18 @@ module Validator =
         let discontinuousNonPRN = Discontinuous |> NonPRN
 
         let timedNonPRN = Timed |> NonPRN
+
+        let toString = function
+            | PRN pt ->
+                match pt with
+                | Continuous -> "prn continuous" 
+                | Discontinuous -> "prn discontinous"
+                | Timed -> "prn timed"
+            | NonPRN pt ->
+                match pt with
+                | Continuous -> "continuous" 
+                | Discontinuous -> "discontinous"
+                | Timed -> "timed"
 
 
     [<CompilationRepresentation(CompilationRepresentationFlags.ModuleSuffix)>]
@@ -398,13 +638,20 @@ module Validator =
                 Text = txt
             }
 
-        let filter gen gnd agt cag gag pca bwt wgt rts (r: Rule) =
-            (gen |> String.startsWithCapsInsens r.Generic ||
-             r.Generic |> String.startsWithCapsInsens gen) &&
+        let toString (r: Rule) =
+            sprintf "Generic: %s, Target: %s, Diagnoses: %s, Prescription: %s, Routes: %s, Advice: %s" 
+                r.Generic 
+                (r.Targets |> TargetFilter.toString)
+                (r.Diagnoses |> DiagnoseFilter.toString)
+                (r.Prescription |> PrescriptionFilter.toString)
+                (r.Routes |> RouteFilter.toString)
+                (r.Error |> List.fold (fun a r -> a + " " + (r |> DoseRule.toString) ) "")
 
+        let filter gen gnd agt cag gag pca bwt wgt rts (r: Rule) =
+            gen       |> String.startsWithCapsInsens r.Generic &&
             r.Targets |> TargetFilter.filter gnd agt cag gag pca bwt wgt &&
             r.Routes  |> RouteFilter.filter rts
-            
+
         let isValid dos (r: Rule) =
             r.Error
             |> List.fold (fun a dr ->
@@ -467,7 +714,7 @@ module Validator =
                     else ValueUnit.create (float freq.Min) freq.Unit |> Some
                 let max = 
                     if freq.Max = 0 then None 
-                    else ValueUnit.create (float freq.Min) freq.Unit |> Some
+                    else ValueUnit.create (float freq.Max) freq.Unit |> Some
                 (min, max) |> FrequencyRange.create
 
         let freqPrescrType = function
@@ -529,7 +776,7 @@ module Validator =
                                     let max = minmax.Max |> Option.bind (fun m ->
                                         ValueUnit.create m un |> Some)
                                     let dr = DoseRange.create (min, max)
-                                    let err = DoseRule.createDose frq dr None 
+                                    let adv, warn, err = DoseRule.createAdvWarnErr frq dr None
                                     let txt = 
                                         sprintf "%s: %s, %s, %s, %s, %s %s" 
                                                 gnc
@@ -539,7 +786,7 @@ module Validator =
                                                 schedule.FrequencyText 
                                                 schedule.ValueText
                                                 un
-                                    yield create gnc trg dgn prs ProductFilter.empty rts [] [] [err] txt
+                                    yield create gnc trg dgn prs ProductFilter.empty rts adv warn err txt
                                 | None -> () ]
                    
 
@@ -552,10 +799,20 @@ module Check =
         | null -> None
         | _ -> o :?> float |> Some
 
+    let floatToString x = 
+        match x |> objToFloat with
+        | Some x -> string x
+        | None -> ""
+
     let objToString (o: obj) =
         match o with
         | null -> ""
-        | _ -> o :?> string
+        | _ -> o |> string
+
+    let objToDate (o: obj) =
+        match o with
+        | null -> None
+        | _ -> o :?> DateTime |> Some
 
     let parseGeneric s =
         let s = 
@@ -569,24 +826,43 @@ module Check =
     let form = FormularyParser.WebSiteParser.getFormulary ()
 
     let toRow valid rule (r : ExcelParser.Prescription.Prescription.Row) =
+        let format = "MM-dd-yy"
+
         [
+            r.Department
+            r.HospitalNumber |> objToString
             r.LastName
             r.FirstName
+            r.BirthDate.ToString(format)
+            (r.BirthDate |> DateTime.dateDiffToAgeString r.Start)
+            r.GestAgeWeeks |> objToString
+            r.GestAgeDays  |> objToString
+            r.BirthWeight  |> objToString
+            r.BirthWghtUnit |> objToString
+            r.Weight |> objToString
+            r.WeightUnit |> objToString
+            r.Start.ToString(format)
+            r.Prescriber
+            (match r.Stop |> objToDate with | None -> "" | Some dt -> dt.ToString(format))
+            r.Prescriber2
             r.Generic
             r.Route
-            (match r.Frequency |> objToFloat with | Some v -> v.ToString() | None -> "")
+            r.Frequency |> objToString
             r.FreqUnit
-            (match r.Dose |> objToFloat with | Some v -> v.ToString() | None -> "")
+            r.Dose |> objToString
             r.DoseUnit
-            (match r.DoseTotal |> objToFloat with | Some v -> v.ToString() | None -> "")
+            r.DoseTotal |> objToString
             r.TotalUnit
+            r.Text |> objToString
             valid.ToString()
             rule
+            ""
         ]
     
-    let check () =
+    let check path =
         [
-            for p in ExcelParser.Prescription.get () do
+            for p in ExcelParser.Prescription.get path do
+                printfn "Processing: %A" p
                 let gen = p.Generic |> parseGeneric
                 let gnd = Validator.TargetFilter.AnyGender
                 let agt =
@@ -598,7 +874,7 @@ module Check =
                     | None -> Validator.TargetFilter.AgeType.AllAge
                 let cag =
                     let ds = 
-                        (p.BirthDate - p.Start).Days |> float
+                        (p.Start - p.BirthDate).Days |> float
                     Validator.ValueUnit.create ds "day"
                     |> Some
                 let gag =
@@ -638,19 +914,59 @@ module Check =
                         Validator.ValueUnit.create v p.TotalUnit |> Some
                     | None -> None
                     
-                match Validator.Rule.fromPediatricFormulary form
+                let rs = Validator.Rule.fromPediatricFormulary form
+                match rs
                       |> List.filter (Validator.Rule.filter gen gnd agt cag gag pca bwt wgt rts) with
                 | h::_ -> yield p |> toRow (h |> Validator.Rule.isValid dos) h.Text
                 | _ ->
                     yield p |> toRow false ""
         ]
+        |> List.append [
+            [
+                "Department"
+                "HospitalNumber"
+                "LastName"
+                "FirstName"
+                "BirthDate"
+                "Age"
+                "GestAgeWeeks"
+                "GestAgeDays"
+                "BirthWeight"
+                "BirthWghtUnit"
+                "Weight"
+                "WeightUnit"
+                "Start"
+                "PrescrStart"
+                "Stop"
+                "PrescrStop"
+                "Generic"
+                "Route"
+                "Frequency"
+                "FreqUnit"
+                "Dose"
+                "DoseUnit"
+                "DoseTotal"
+                "TotalUnit"
+                "Text"
+                "Valid"
+                "Pediatric"
+                "GStandard"
+            ]
+        ]
 
 
+let path = IO.Path.Combine(Environment.CurrentDirectory, "prescriptions.xlsx")
+Check.check path 
+//|> List.map (fun x -> printfn "%A" x; x)
+|> ExcelParser.ExcelWriter.seqToExcel "check" "medication"
+//|> List.filter (fun (gen, vld, txt) -> txt |> Option.isSome) // |> List.length
+//|> List.distinct
+//|> List.iter (printfn "%A")
 
-Check.check () |> ExcelParser.ExcelWriter.seqToExcel "check" "medication"
-|> List.filter (fun (gen, vld, txt) -> txt |> Option.isSome) // |> List.length
-|> List.distinct
-|> List.iter (printfn "%A")
+Check.form
+|> Validator.Rule.fromPediatricFormulary
+|> List.map (fun r -> [r.Text; r |> Validator.Rule.toString])
+|> ExcelParser.ExcelWriter.seqToExcel "test" "test"
 
 Check.form
 |> Array.filter (fun d -> d.Generic |> String.startsWithCapsInsens "gentamicine")
