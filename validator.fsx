@@ -3,6 +3,8 @@
 
 #load "../FormularyParser/formularyParser.fsx"
       "../ExcelMedicationParser/excelParser.fsx"
+      "../Zindex.TypeProvider/zindex.fsx"
+
 
 open System
 
@@ -595,6 +597,10 @@ module Validator =
 
         let createProduct id nm = { Id = id ; Name = nm }
 
+        let createGeneric id nm = createProduct id nm |> GenericProduct
+
+        let createTrade id nm = createProduct id nm |> TradeProduct
+
         let empty = create [] []
 
 
@@ -612,6 +618,7 @@ module Validator =
 
         type Rule =
             {
+                Source : string
                 Generic : string
                 Targets : TargetFilter
                 Diagnoses : DiagnoseFilter
@@ -624,8 +631,9 @@ module Validator =
                 Text : string
             }
 
-        let create gnc trg dgn prs drg rts adv wrn err txt =
+        let create src gnc trg dgn prs drg rts adv wrn err txt =
             {
+                Source = src
                 Generic = gnc
                 Targets = trg
                 Diagnoses = dgn
@@ -733,8 +741,10 @@ module Validator =
                 FrequencyRange.empty
 
         let fromPediatricFormulary (drugs : FP.Drug.Drug []) =
+            let src = "Pediatric"
             [
                 for drug in drugs do
+                    printfn "Getting Pediatric rules for: %s" drug.Generic
                     let gnc = drug.Generic
                     for dose in drug.Doses do
                         let dgn = 
@@ -786,9 +796,80 @@ module Validator =
                                                 schedule.FrequencyText 
                                                 schedule.ValueText
                                                 un
-                                    yield create gnc trg dgn prs ProductFilter.empty rts adv warn err txt
+                                    yield create src gnc trg dgn prs ProductFilter.empty rts adv warn err txt
                                 | None -> () ]
-                   
+
+        let fromGStandard (gpps: Zindex.GenPresProduct.GenPresProduct[])
+                          (gsrs: Zindex.DoseRule.DoseRule[]) =
+            let src = "GStandard"
+            [
+                for gpp in gpps do
+                    printfn "Getting GStand rules for: %s" gpp.Name
+                    for gp in gpp.GenericProducts do
+                        yield!
+                            gsrs
+                            |> Array.filter (fun gsr ->
+                                gsr.GenericProduct
+                                |> Array.exists (fun gp' -> 
+                                    gp'.Id = gp.Id &&
+                                    (gsr.CareGroup = "alle" || 
+                                     gsr.CareGroup = "intensieve")
+                                ) &&
+                                gpp.Route
+                                |> Array.exists (String.eqsCapsInsens gsr.Route)
+                            )
+                            |> Array.map (fun gsr -> 
+                                let gnc = gpp.Name
+                                let trg =
+                                    let gnd = 
+                                        match gsr.Gender with
+                                        | _ when gsr.Gender = "F" -> TargetFilter.Female
+                                        | _ when gsr.Gender = "M" -> TargetFilter.Male
+                                        | _ -> TargetFilter.AnyGender
+                                    let car =
+                                        let min = gsr.Age.Min |> Option.bind (fun a -> ValueUnit.create a "month" |> Some)
+                                        let max = gsr.Abs.Max |> Option.bind (fun a -> ValueUnit.create a "month" |> Some)
+                                        TargetFilter.ChronAgeRange (min, max)
+                                    let gar = TargetFilter.GestAgeRange     (None, None)
+                                    let pcr = TargetFilter.PostConcAgeRange (None, None)
+                                    let bwr = TargetFilter.BirthWeightRange (None, None)
+                                    let awr =
+                                        let min = gsr.Weight.Min |> Option.bind (fun w -> ValueUnit.create w "kg" |> Some)
+                                        let max = gsr.Weight.Max |> Option.bind (fun w -> ValueUnit.create w "kg" |> Some)
+                                        TargetFilter.WeightRange (min, max)
+                                    let bmr = 
+                                        let min = gsr.BSA.Min |> Option.bind (fun m -> ValueUnit.create m "m2" |> Some)
+                                        let max = gsr.BSA.Max |> Option.bind (fun m -> ValueUnit.create m "m2" |> Some)
+                                        TargetFilter.BsaRange (min, max)
+                                    TargetFilter.create gnd TargetFilter.AllAge car gar pcr bwr awr bmr
+                                let dgn =
+                                    let inds = [DiagnoseFilter.createIndication gsr.Indication]
+                                    DiagnoseFilter.create inds []
+                                let prs = PrescriptionFilter.discontinuousNonPRN
+                                let drg =
+                                    let gps = [ ProductFilter.createGeneric gp.Id gp.Name ]
+                                    let tps = 
+                                        gp.PrescriptionProducts
+                                        |> Array.collect (fun pp -> pp.TradeProducts)
+                                        |> Array.toList
+                                        |> List.map (fun tp -> ProductFilter.createTrade tp.Id tp.Name)
+                                    ProductFilter.create gps tps
+                                let rtf = [ gsr.Route |> RouteFilter.createRoute ] |> RouteFilter.create
+                                let adv = []
+                                let wrn = []
+                                let err = []
+
+                                create src gnc trg dgn prs drg rtf [] [] [] "GStand Rule"
+                            )
+            ]
+
+
+//Validator.Rule.fromGStandard (Zindex.Database.getProducts()) (Zindex.DoseRule.get())
+//|> Seq.length                   
+//
+//Zindex.DoseRule.get() 
+//|> Array.map (fun gsr -> gsr.DoseType)
+//|> Array.distinct
 
 module Check =
 
@@ -825,7 +906,7 @@ module Check =
 
     let form = FormularyParser.WebSiteParser.getFormulary ()
 
-    let toRow valid rule (r : ExcelParser.Prescription.Prescription.Row) =
+    let toRow valid pedtext gsttext (r : ExcelParser.Prescription.Prescription.Row) =
         let format = "MM-dd-yy"
 
         [
@@ -855,11 +936,17 @@ module Check =
             r.TotalUnit
             r.Text |> objToString
             valid.ToString()
-            rule
-            ""
+            pedtext
+            gsttext
         ]
     
     let check path =
+        let pedrs = 
+            Validator.Rule.fromPediatricFormulary form
+        let gstrs =
+            let gpps = Zindex.Database.getProducts ()
+            let gsrs = Zindex.DoseRule.get()
+            Validator.Rule.fromGStandard gpps gsrs
         [
             for p in ExcelParser.Prescription.get path do
                 printfn "Processing: %A" p
@@ -914,12 +1001,25 @@ module Check =
                         Validator.ValueUnit.create v p.TotalUnit |> Some
                     | None -> None
                     
-                let rs = Validator.Rule.fromPediatricFormulary form
-                match rs
-                      |> List.filter (Validator.Rule.filter gen gnd agt cag gag pca bwt wgt rts) with
-                | h::_ -> yield p |> toRow (h |> Validator.Rule.isValid dos) h.Text
+                match pedrs
+                      |> List.tryFind (Validator.Rule.filter gen gnd agt cag gag pca bwt wgt rts) ,
+                      gstrs 
+                      |> List.tryFind (Validator.Rule.filter gen gnd agt cag gag pca bwt wgt rts) with
+                | Some pedr, Some gstr -> 
+                    let isValid =
+                        pedr |> Validator.Rule.isValid dos &&
+                        gstr |> Validator.Rule.isValid dos
+                    yield p |> toRow isValid pedr.Text gstr.Text
+                | Some pedr, None -> 
+                    let isValid =
+                        pedr |> Validator.Rule.isValid dos
+                    yield p |> toRow isValid pedr.Text ""
+                | None, Some gstr -> 
+                    let isValid =
+                        gstr |> Validator.Rule.isValid dos
+                    yield p |> toRow isValid "" gstr.Text
                 | _ ->
-                    yield p |> toRow false ""
+                    yield p |> toRow false "" ""
         ]
         |> List.append [
             [
@@ -1018,4 +1118,26 @@ Check.form
 //)
 //|> List.iter (printfn "%A")
 
-  
+Zindex.Database.getProducts ()
+|> Array.filter (fun gpp ->
+    gpp.GenericProducts
+    |> Array.exists (fun gp -> 
+        gp.PrescriptionProducts
+        |> Array.exists (fun pp ->
+            pp.TradeProducts
+            |> Array.exists (fun tp ->
+                tp.Denominator > 0
+            )
+        )
+    )
+)
+|> Array.collect (fun gpp -> 
+    gpp.GenericProducts
+    |> Array.collect (fun gp ->
+        gp.PrescriptionProducts
+        |> Array.collect (fun pp ->
+            pp.TradeProducts
+            |> Array.map (fun tp -> tp.Label)
+        )
+    )
+) |> Array.iter (printfn "%s")
